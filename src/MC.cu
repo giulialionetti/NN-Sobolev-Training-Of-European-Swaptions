@@ -29,10 +29,13 @@ void analytical_greeks(float t, float T, float S, float K, float rt){
     LOG_INFO("Delta ZBP         : %.6f", delta_zbp);
 }
 
-void monteCarlo_vega(float T, float S, float K, curandState* d_states, CurveType curve){
-   
-    float* d_ZBC   = nullptr;
-    float* d_vega  = nullptr;
+
+void monteCarlo_vega(float T, float S, float K, curandState* d_states, CurveType curve,
+                     float* d_P_market = nullptr, float* d_f_market = nullptr,
+                     float* h_P = nullptr, float* h_f = nullptr){
+
+    float* d_ZBC  = nullptr;
+    float* d_vega = nullptr;
     cudaMalloc(&d_ZBC,  sizeof(float));
     cudaMalloc(&d_vega, sizeof(float));
     cudaMemset(d_ZBC,  0, sizeof(float));
@@ -43,10 +46,11 @@ void monteCarlo_vega(float T, float S, float K, curandState* d_states, CurveType
     cudaEventCreate(&stop);
     cudaEventRecord(start);
 
-    const char* label = (curve == CurveType::FLAT) ? "FLAT" : "PIECEWISE";
+    const char* label = (curve == CurveType::FLAT) ? "FLAT" :
+                        (d_P_market == nullptr)     ? "PIECEWISE" : "PIECEWISE+MARKET";
     LOG_INFO("=== MC Pricing [%s curve] ===", label);
 
-    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC, d_vega, d_states, T, S, K);
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC, d_vega, d_states, T, S, K, d_P_market, d_f_market);
 
     cudaEventRecord(stop);
     cudaDeviceSynchronize();
@@ -60,42 +64,51 @@ void monteCarlo_vega(float T, float S, float K, curandState* d_states, CurveType
     h_ZBC  /= N_PATHS;
     h_vega /= N_PATHS;
 
+    if(d_P_market == nullptr){
     float analytical_zbc  = ZBC(0.0f, T, S, K, host_r0, host_a, host_sigma, host_r0);
     float analytical_vega = vega_ZBC(0.0f, T, S, K, host_r0, host_a, host_sigma, host_r0);
-
     LOG_INFO("MC ZBC:          %.6f  |  Analytical: %.6f  |  Error: %.2e",
              h_ZBC, analytical_zbc, fabsf(h_ZBC - analytical_zbc));
     LOG_INFO("MC Vega:         %.6f  |  Analytical: %.6f  |  Error: %.2e",
              h_vega, analytical_vega, fabsf(h_vega - analytical_vega));
-    LOG_INFO("Simulation time: %.2f ms  |  Throughput: %.2f M paths/sec",
-             elapsed_ms, N_PATHS / elapsed_ms / 1000.0f);
-
+} else {
+    float analytical_zbc  = ZBC_market(0.0f, T, S, K, host_r0, host_a, host_sigma,
+                                       h_P, h_f, MAT_SPACING, N_MAT);
+    float analytical_vega = vega_ZBC_market(0.0f, T, S, K, host_r0, host_a, host_sigma,
+                                            h_P, h_f, MAT_SPACING, N_MAT);
+    LOG_INFO("MC ZBC:          %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+             h_ZBC, analytical_zbc, fabsf(h_ZBC - analytical_zbc));
+    LOG_INFO("MC Vega:         %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+             h_vega, analytical_vega, fabsf(h_vega - analytical_vega));
+}
     cudaFree(d_ZBC);
     cudaFree(d_vega);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-
 }
 
-void finitedifferences_mc_vega(float T, float S, float K, curandState* d_states, CurveType curve){
+void finitedifferences_mc_vega(float T, float S, float K, curandState* d_states, CurveType curve,
+                                float* d_P_market = nullptr, float* d_f_market = nullptr,
+                                float* h_P = nullptr, float* h_f = nullptr){
 
     float eps  = 0.001f;
     unsigned long seed = time(NULL);
 
-    float* d_ZBC_plus  = nullptr;
-    float* d_ZBC_minus = nullptr;
+    float* d_ZBC_plus   = nullptr;
+    float* d_ZBC_minus  = nullptr;
     float* d_vega_dummy = nullptr;
     cudaMalloc(&d_ZBC_plus,   sizeof(float));
     cudaMalloc(&d_ZBC_minus,  sizeof(float));
     cudaMalloc(&d_vega_dummy, sizeof(float));
 
     // bump up
-    cudaMemset(d_ZBC_plus,  0, sizeof(float));
+    cudaMemset(d_ZBC_plus,   0, sizeof(float));
     cudaMemset(d_vega_dummy, 0, sizeof(float));
     init_device_constants(host_sigma + eps, curve);
     init_rng<<<NB, NTPB>>>(d_states, seed);
     cudaDeviceSynchronize();
-    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_plus, d_vega_dummy, d_states, T, S, K);
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_plus, d_vega_dummy, d_states, T, S, K,
+                               d_P_market, d_f_market);
     cudaDeviceSynchronize();
 
     // bump down — same seed
@@ -104,7 +117,8 @@ void finitedifferences_mc_vega(float T, float S, float K, curandState* d_states,
     init_device_constants(host_sigma - eps, curve);
     init_rng<<<NB, NTPB>>>(d_states, seed);
     cudaDeviceSynchronize();
-    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_minus, d_vega_dummy, d_states, T, S, K);
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_minus, d_vega_dummy, d_states, T, S, K,
+                               d_P_market, d_f_market);
     cudaDeviceSynchronize();
 
     float h_plus, h_minus;
@@ -113,20 +127,57 @@ void finitedifferences_mc_vega(float T, float S, float K, curandState* d_states,
     h_plus  /= N_PATHS;
     h_minus /= N_PATHS;
 
-    float vega_fd         = (h_plus - h_minus) / (2.0f * eps);
+    float vega_fd = (h_plus - h_minus) / (2.0f * eps);
+   if(d_P_market == nullptr){
     float analytical_vega = vega_ZBC(0.0f, T, S, K, host_r0, host_a, host_sigma, host_r0);
-
     LOG_INFO("FD Vega:         %.6f  |  Analytical: %.6f  |  Error: %.2e",
              vega_fd, analytical_vega, fabsf(vega_fd - analytical_vega));
+} else {
+    float analytical_vega = vega_ZBC_market(0.0f, T, S, K, host_r0, host_a, host_sigma,
+                                            h_P, h_f, MAT_SPACING, N_MAT);
+    LOG_INFO("FD Vega:         %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+             vega_fd, analytical_vega, fabsf(vega_fd - analytical_vega));
+}
 
     cudaFree(d_ZBC_plus);
     cudaFree(d_ZBC_minus);
     cudaFree(d_vega_dummy);
-
 }
 
+
+void compute_market_data(float* h_P, float* h_f, curandState* d_states){
+
+    float* d_P_sum;
+    cudaMalloc(&d_P_sum, N_MAT * sizeof(float));
+    cudaMemset(d_P_sum, 0, N_MAT * sizeof(float));
+
+    init_device_constants(host_sigma, CurveType::PIECEWISE_LINEAR);
+    mc_P0T<<<NB, NTPB>>>(d_P_sum, d_states);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_P, d_P_sum, N_MAT * sizeof(float), cudaMemcpyDeviceToHost);
+
+
+    // normalize
+    for(int k = 0; k < N_MAT; k++)
+        h_P[k] /= N_PATHS;
+
+    // P(0,0) = 1 by definition
+    // f(0,T) via finite difference: f(0,T) = -d/dT ln P(0,T)
+    h_f[0] = -(logf(h_P[1]) - logf(1.0f)) / MAT_SPACING;
+    for(int k = 1; k < N_MAT - 1; k++)
+        h_f[k] = -(logf(h_P[k+1]) - logf(h_P[k-1])) / (2.0f * MAT_SPACING);
+    h_f[N_MAT-1] = -(logf(h_P[N_MAT-1]) - logf(h_P[N_MAT-2])) / MAT_SPACING;
+
+    LOG_INFO("=== Market Data (Piecewise theta) ===");
+    LOG_INFO("P(0,1)=%.6f  P(0,5)=%.6f  P(0,10)=%.6f",
+             h_P[9], h_P[49], h_P[99]);
+    LOG_INFO("f(0,1)=%.6f  f(0,5)=%.6f  f(0,10)=%.6f",
+             h_f[9], h_f[49], h_f[99]);
+
+    cudaFree(d_P_sum);
+}
 int main(){
-    
     Logger& log = Logger::instance();
     log.open_file("hw_output.log");
     log.set_level(LogLevel::DEBUG);
@@ -138,20 +189,45 @@ int main(){
 
     analytical_greeks(t, T, S, K, host_r0);
 
-    init_device_constants();
     curandState* d_states;
     cudaMalloc(&d_states, N_PATHS * sizeof(curandState));
     init_rng<<<NB, NTPB>>>(d_states, time(NULL));
     cudaDeviceSynchronize();
 
-    init_device_constants(host_sigma, CurveType::FLAT);
-    monteCarlo_vega(T, S, K, d_states, CurveType::FLAT);
-    finitedifferences_mc_vega(T, S, K, d_states,CurveType::FLAT);
+    // compute market data from piecewise theta
+    float h_P[N_MAT], h_f[N_MAT];
+    compute_market_data(h_P, h_f, d_states);
 
-    init_device_constants(host_sigma, CurveType::PIECEWISE_LINEAR);
-    monteCarlo_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
-    finitedifferences_mc_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
+    // upload market data to device
+    float* d_P_market = nullptr;
+    float* d_f_market = nullptr;
+    cudaMalloc(&d_P_market, N_MAT * sizeof(float));
+    cudaMalloc(&d_f_market, N_MAT * sizeof(float));
+    cudaMemcpy(d_P_market, h_P, N_MAT * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_f_market, h_f, N_MAT * sizeof(float), cudaMemcpyHostToDevice);
 
-    cudaFree(d_states);
+    // reinitialize RNG
+    init_rng<<<NB, NTPB>>>(d_states, time(NULL));
+    cudaDeviceSynchronize();
+
+    // flat curve — no market data
+init_device_constants(host_sigma, CurveType::FLAT);
+monteCarlo_vega(T, S, K, d_states, CurveType::FLAT);
+finitedifferences_mc_vega(T, S, K, d_states, CurveType::FLAT);
+
+// piecewise — flat curve AtT, no market data
+init_device_constants(host_sigma, CurveType::PIECEWISE_LINEAR);
+monteCarlo_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
+finitedifferences_mc_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
+
+// piecewise — market data AtT
+init_device_constants(host_sigma, CurveType::PIECEWISE_LINEAR);
+monteCarlo_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR, d_P_market, d_f_market, h_P, h_f);
+finitedifferences_mc_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR, 
+                           d_P_market, d_f_market, h_P, h_f);
+
+cudaFree(d_states);
+    cudaFree(d_P_market);
+    cudaFree(d_f_market);
     return 0;
 }

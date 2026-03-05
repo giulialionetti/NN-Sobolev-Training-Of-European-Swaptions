@@ -15,6 +15,9 @@
 #define NB ((N_PATHS + NTPB - 1) / NTPB)
 #define N_STEPS 1000
 #define T_FINAL 10.0f
+#define N_MAT 100
+#define MAT_SPACING 0.1f
+#define SAVE_STRIDE 10
 
 const float host_a = 1.0f;
 const float host_sigma = 0.1f;
@@ -111,8 +114,35 @@ __device__ inline void evolve_short_rate_derivative(float& drdsigma_step_i,
         drdsigma_step_i = drdsigma_step_i_plus_one;
 }
 
+__global__ void mc_P0T(float* P_estimator, curandState* states){
+
+    int path_id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if(path_id >= N_PATHS) return;
+
+    curandState local_state = states[path_id];
+
+    float r_step_i = device_r0;
+    float discount_factor_integral = 0.0f;
+    int maturity_index = 0;
+
+     for(int i=0; i< N_STEPS; i++){
+        float G = curand_normal(&local_state);
+         evolve_short_rate(r_step_i, discount_factor_integral, device_drift_table[i], G);
+
+     if((i+1) % SAVE_STRIDE == 0){
+        atomicAdd(&P_estimator[maturity_index], expf(-discount_factor_integral));
+        maturity_index++;
+     }
+
+    }
+     states[path_id] = local_state;
+
+}
+
 __global__ void mc_zbc_vega(float* ZBC_estimator, float* vega_estimator,
- curandState* states, float T_maturity, float S, float K){
+ curandState* states, float T_maturity, float S, float K,
+ const float* P_market, const float* f_market){
 
         int path_id = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -131,48 +161,45 @@ __global__ void mc_zbc_vega(float* ZBC_estimator, float* vega_estimator,
             float drdsigma_step_i = 0.0f;
             float drdsigma_integral = 0.0f;
 
-          // evolve N paths from t=0 to T_maturity
-          int n_steps_T = (int)(T_maturity / device_dt);
-          for(int i=0; i < n_steps_T; i++){
-    
-             float G = curand_normal(&local_state);
-            
-            evolve_short_rate(r_step_i, discount_factor_integral, device_drift_table[i], G);
-            evolve_short_rate_derivative(drdsigma_step_i, drdsigma_integral, device_sensitivity_drift_table[i], G);
+            int n_steps_T = (int)(T_maturity / device_dt);
+            for(int i=0; i < n_steps_T; i++){
+                float G = curand_normal(&local_state);
+                evolve_short_rate(r_step_i, discount_factor_integral, device_drift_table[i], G);
+                evolve_short_rate_derivative(drdsigma_step_i, drdsigma_integral,
+                                            device_sensitivity_drift_table[i], G);
+            }
 
+            float bond_price_at_maturity = (P_market == nullptr) ?
+                PtT(T_maturity, S, r_step_i, device_a, device_sigma, device_r0) :
+                PtT_market(T_maturity, S, r_step_i, device_a, device_sigma,
+                           P_market, f_market, MAT_SPACING, N_MAT);
 
-          }
+            float discount_factor = expf(-discount_factor_integral);
+            float dPricedsigma = -BtT(T_maturity, S, device_a) *
+                                  bond_price_at_maturity * drdsigma_step_i;
 
-          float bond_price_at_maturity = PtT(T_maturity, S, r_step_i, device_a, device_sigma, device_r0);
-          float discount_factor = expf(-discount_factor_integral);
-
-          float dPricedsigma = -BtT(T_maturity, S, device_a) * bond_price_at_maturity * drdsigma_step_i;
-
-           thread_zbc = discount_factor * fmaxf(bond_price_at_maturity - K, 0.0f);
-           thread_vega = discount_factor * dPricedsigma * (bond_price_at_maturity > K ? 1.0f : 0.0f)
-            - drdsigma_integral * discount_factor * fmaxf(bond_price_at_maturity - K, 0.0f);
-           states[path_id] = local_state;
+            thread_zbc = discount_factor * fmaxf(bond_price_at_maturity - K, 0.0f);
+            thread_vega = discount_factor * dPricedsigma * (bond_price_at_maturity > K ? 1.0f : 0.0f)
+                        - drdsigma_integral * discount_factor * fmaxf(bond_price_at_maturity - K, 0.0f);
+            states[path_id] = local_state;
         }
 
-
-        shared_zbc[threadIdx.x]= thread_zbc;
-        shared_vega[threadIdx.x]= thread_vega;
+        shared_zbc[threadIdx.x] = thread_zbc;
+        shared_vega[threadIdx.x] = thread_vega;
         __syncthreads();
 
         for(int i = NTPB/2; i > 0 ; i >>= 1){
-            if (threadIdx.x < i){
+            if(threadIdx.x < i){
                 shared_zbc[threadIdx.x] += shared_zbc[threadIdx.x + i];
-                shared_vega[threadIdx.x] += shared_vega[threadIdx.x +i];
+                shared_vega[threadIdx.x] += shared_vega[threadIdx.x + i];
             }
-         
             __syncthreads();
-
         }
 
         if(threadIdx.x == 0){
             atomicAdd(ZBC_estimator, shared_zbc[0]);
             atomicAdd(vega_estimator, shared_vega[0]);
         }
- }
+}
 
 #endif // MC_CUH
