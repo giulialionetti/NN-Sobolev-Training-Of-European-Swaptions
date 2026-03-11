@@ -1,6 +1,7 @@
 #include "mc.cuh"
 #include "swaptions.cuh"
 #include "logger.h"
+#include "calibration.cuh"
 
 
 void analytical_greeks(float t, float T, float S, float K, float rt){
@@ -167,7 +168,7 @@ void compute_market_data(float* h_P, float* h_f, curandState* d_states){
     // f(0,T) via finite difference: f(0,T) = -d/dT ln P(0,T)
     h_f[0] = -(logf(h_P[1]) - logf(1.0f)) / MAT_SPACING;
     for(int k = 1; k < N_MAT - 1; k++)
-        h_f[k] = -(logf(h_P[k+1]) - logf(h_P[k-1])) / (2.0f * MAT_SPACING);
+    h_f[k] = -(logf(h_P[k+1]) - logf(h_P[k-1])) / (2.0f * MAT_SPACING);
     h_f[N_MAT-1] = -(logf(h_P[N_MAT-1]) - logf(h_P[N_MAT-2])) / MAT_SPACING;
 
     LOG_INFO("=== Market Data (Piecewise theta) ===");
@@ -211,7 +212,7 @@ void monteCarlo_swaption(float T_expiry, curandState* d_states,
 
 void finitedifferences_mc_swaption_vega(float T_expiry, curandState* d_states,
                                          float* d_P_market, float* d_f_market){
-    float eps        = 0.001f;
+    float eps          = 0.001f;
     unsigned long seed = time(NULL);
 
     float* d_swaption_plus  = nullptr;
@@ -221,10 +222,13 @@ void finitedifferences_mc_swaption_vega(float T_expiry, curandState* d_states,
     cudaMalloc(&d_swaption_minus, sizeof(float));
     cudaMalloc(&d_vega_dummy,     sizeof(float));
 
-    // bump up
+    // bump up — only sigma and std_gaussian_shock, drift table unchanged
+    float sig_p    = host_sigma + eps;
+    float shock_p  = sig_p * sqrtf((1.0f - expf(-2.0f*host_a*host_dt)) / (2.0f*host_a));
     cudaMemset(d_swaption_plus, 0, sizeof(float));
     cudaMemset(d_vega_dummy,    0, sizeof(float));
-    init_device_constants(host_sigma + eps, CurveType::PIECEWISE_LINEAR);
+    cudaMemcpyToSymbol(device_sigma,             &sig_p,   sizeof(float));
+    cudaMemcpyToSymbol(device_std_gaussian_shock, &shock_p, sizeof(float));
     init_rng<<<NB, NTPB>>>(d_states, seed);
     cudaDeviceSynchronize();
     mc_swaption<<<NB, NTPB>>>(d_swaption_plus, d_vega_dummy, d_states,
@@ -232,14 +236,22 @@ void finitedifferences_mc_swaption_vega(float T_expiry, curandState* d_states,
     cudaDeviceSynchronize();
 
     // bump down — same seed
+    float sig_m    = host_sigma - eps;
+    float shock_m  = sig_m * sqrtf((1.0f - expf(-2.0f*host_a*host_dt)) / (2.0f*host_a));
     cudaMemset(d_swaption_minus, 0, sizeof(float));
     cudaMemset(d_vega_dummy,     0, sizeof(float));
-    init_device_constants(host_sigma - eps, CurveType::PIECEWISE_LINEAR);
+    cudaMemcpyToSymbol(device_sigma,             &sig_m,   sizeof(float));
+    cudaMemcpyToSymbol(device_std_gaussian_shock, &shock_m, sizeof(float));
     init_rng<<<NB, NTPB>>>(d_states, seed);
     cudaDeviceSynchronize();
     mc_swaption<<<NB, NTPB>>>(d_swaption_minus, d_vega_dummy, d_states,
                                T_expiry, d_P_market, d_f_market);
     cudaDeviceSynchronize();
+
+    // restore
+    float shock_orig = host_sigma * sqrtf((1.0f - expf(-2.0f*host_a*host_dt)) / (2.0f*host_a));
+    cudaMemcpyToSymbol(device_sigma,             &host_sigma,  sizeof(float));
+    cudaMemcpyToSymbol(device_std_gaussian_shock, &shock_orig, sizeof(float));
 
     float h_plus, h_minus;
     cudaMemcpy(&h_plus,  d_swaption_plus,  sizeof(float), cudaMemcpyDeviceToHost);
@@ -298,8 +310,9 @@ monteCarlo_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
 finitedifferences_mc_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR);
 
 // piecewise — market data AtT
-init_device_constants(host_sigma, CurveType::PIECEWISE_LINEAR);
+init_device_constants_calibrated(h_f);
 monteCarlo_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR, d_P_market, d_f_market, h_P, h_f);
+
 finitedifferences_mc_vega(T, S, K, d_states, CurveType::PIECEWISE_LINEAR, 
                            d_P_market, d_f_market, h_P, h_f);
 

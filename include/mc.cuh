@@ -54,7 +54,7 @@ float compute_drift_piecewise_linear(int i){
     float s = i * host_dt;
     float s_plus_dt  = s + host_dt;
 
-    float alpha = (s < 5.0f) ? 0.012f  : 0.014f;
+    float alpha = (s < 5.0f) ? 0.012f  : 0.019f;
     float beta  = (s < 5.0f) ? 0.0014f : 0.001f;
     return (alpha + beta * s_plus_dt) * ((1.0f - expf(-host_a * host_dt))/ host_a) -
      beta * (1.0f - expf(-host_a * host_dt) * (1.0f + host_a * host_dt)) / (host_a * host_a);

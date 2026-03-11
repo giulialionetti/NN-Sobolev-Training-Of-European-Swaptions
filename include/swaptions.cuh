@@ -87,11 +87,26 @@ inline float analytical_swaption_vega(float T, const float* tenor_dates, int n_t
     MarketCurve curve{a, sigma, host_Price, host_fwd_rate, maturity_spacing, n_maturities};
 
     float vega = 0.0f;
+    
     for(int i = 0; i < n_tenors; i++){
-        float X_i = curve.P(T, tenor_dates[i], r_star);
-        vega += c[i] * vega_ZBP_impl(0.0f, T, tenor_dates[i], X_i,
-                                      r0, a, sigma, curve);
-    }
+    float X_i    = curve.P(T, tenor_dates[i], r_star);
+    float B_T_Ti = BtT(T, tenor_dates[i], a);
+    
+    // dX_i/dsigma from convexity term in A(T,Ti)
+    float dXi_dsigma = -X_i * (sigma / (2.0f * a))
+                      * (1.0f - expf(-2.0f * a * T)) * B_T_Ti * B_T_Ti;
+
+    // ∂ZBP/∂X_i = -P(0,T) * N(-h + sigma_p)  
+    float bond_0_T  = curve.P(0.0f, T, r0);
+    float bond_0_Ti = curve.P(0.0f, tenor_dates[i], r0);
+    float B_T_Ti_s  = BtT(T, tenor_dates[i], a);
+    float sigma_p   = sigma * sqrtf((1.0f - expf(-2.0f * a * T)) / (2.0f * a)) * B_T_Ti_s;
+    float h         = (1.0f / sigma_p) * logf(bond_0_Ti / (bond_0_T * X_i)) + sigma_p / 2.0f;
+    float dZBP_dXi  = -bond_0_T * normcdff(-h + sigma_p);
+
+    vega += c[i] * (vega_ZBP_impl(0.0f, T, tenor_dates[i], X_i, r0, a, sigma, curve)
+                  + dZBP_dXi * dXi_dsigma);
+}
     return vega;
 }
 

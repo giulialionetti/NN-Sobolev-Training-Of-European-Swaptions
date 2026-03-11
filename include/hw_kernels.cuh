@@ -101,12 +101,25 @@ __host__ __device__ inline float vega_ZBC_impl(float t, float T_maturity, float 
     float bond_price_t_S  = curve.P(t, S, rt);
     float bond_price_t_T  = curve.P(t, T_maturity, rt);
     float B_T_maturity_S  = BtT(T_maturity, S, a);
+    float B_t_S           = BtT(t, S, a);
+    float B_t_T           = BtT(t, T_maturity, a);
     float sigma_p         = sigma * sqrtf((1.0f - expf(-2.0f * a * (T_maturity - t)))
                                           / (2.0f * a)) * B_T_maturity_S;
     float h               = (1.0f / sigma_p) * logf(bond_price_t_S
                              / (bond_price_t_T * K)) + sigma_p / 2.0f;
     float phi_h           = expf(-h * h * 0.5f) / sqrtf(2.0f * 3.14159265f);
-    return bond_price_t_S * phi_h * (sigma_p / sigma);
+
+    // d(sigma_p)/dsigma
+    float dsigmap_dsigma  = sigma_p / sigma;
+
+    // d(P(t,S))/dsigma and d(P(t,T))/dsigma from convexity term in A
+    float conv            = (1.0f - expf(-2.0f * a * t)) / (2.0f * a);
+    float dPS_dsigma      = -bond_price_t_S * sigma * conv * B_t_S * B_t_S;
+    float dPT_dsigma      = -bond_price_t_T * sigma * conv * B_t_T * B_t_T;
+
+    return bond_price_t_S * phi_h * dsigmap_dsigma
+         + normcdff(h)         * dPS_dsigma
+         - K * normcdff(h - sigma_p) * dPT_dsigma;
 }
 
 template<typename Curve>
