@@ -69,8 +69,8 @@ inline float analytical_swaption(float T, const float* tenor_dates, int n_tenors
     float swaption_price = 0.0f;
     for(int i = 0; i < n_tenors; i++){
         float X_i = curve.P(T, tenor_dates[i], r_star);
-        swaption_price += c[i] * ZBP_impl(0.0f, T, tenor_dates[i], X_i,
-                                           r0, a, sigma, curve);
+        swaption_price += c[i] * ZBP_from_state(
+    make_pricing_state(0.0f, T, tenor_dates[i], X_i, r0, a, sigma, curve));
     }
     return swaption_price;
 }

@@ -8,7 +8,9 @@
 #include <curand_kernel.h>
 #include <stdio.h>
 #include <math.h>
-#include "hw_kernels.cuh"
+#include "hw_primitives.cuh"
+#include "hw_pricing.cuh"
+#include "hw_greeks_first.cuh"
 #include "calibration.cuh"
 
 #define N_PATHS (1024 * 1024)
@@ -221,10 +223,8 @@ __global__ void mc_zbc_vega(float* ZBC_estimator, float* vega_estimator,
             }
 
             float bond_price_at_maturity = (P_market == nullptr) ?
-                PtT(T_maturity, S, r_step_i, device_a, device_sigma, device_r0) :
-                PtT_market(T_maturity, S, r_step_i, device_a, device_sigma,
-                           P_market, f_market, MAT_SPACING, N_MAT);
-
+            FlatCurve{device_a, device_sigma, device_r0}.P(T_maturity, S, r_step_i) :
+            MarketCurve{device_a, device_sigma, P_market, f_market, MAT_SPACING, N_MAT}.P(T_maturity, S, r_step_i);
             float discount_factor = expf(-discount_factor_integral);
             float B_val = BtT(T_maturity, S, device_a);
             float convexity_dsigma = (device_sigma / (2.0f * device_a))
