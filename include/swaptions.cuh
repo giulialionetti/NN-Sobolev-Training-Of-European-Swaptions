@@ -151,7 +151,7 @@ inline float analytical_payer_swaption_volga(float T, const float* tenor_dates, 
 
         // term 2: (σ_p/σ) · P(0,ti) · φ(-hi) · hi · dh_ds
         //       = dsp_ds · PS_phi_h · h · dh_ds
-        float term2 = ps.dsp_ds * ps.PS_phi_h * (-ps.h) * dh_ds;
+        float term2 = ps.dsp_ds * ps.PS_phi_h * (ps.h) * dh_ds;
 
         volga += c[i] * (term1 + term2);
     }

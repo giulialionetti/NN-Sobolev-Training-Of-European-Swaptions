@@ -17,7 +17,6 @@
 // In all three, the ∂h/∂σ terms do NOT cancel via PS_phi_h —
 // unlike delta and vega, here they survive and produce the (α) term.
 //
-// Derivation: zbp_volga_derivation.pdf, eq. (22)-(27)
 
 __host__ __device__ inline float volga_ZBC_from_state(const PricingState& ps){
 
