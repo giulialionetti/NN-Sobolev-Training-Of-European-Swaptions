@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "hw_primitives.cuh"
+#include "logger.h"
 #include "calibration.cuh"
 
 #define N_PATHS     (1024 * 1024)

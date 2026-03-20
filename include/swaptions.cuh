@@ -129,8 +129,6 @@ inline float analytical_payer_swaption_volga(float T, const float* tenor_dates, 
 
     MarketCurve curve{a, sigma, host_Price, host_fwd_rate, maturity_spacing, n_maturities};
 
-    float srvn_T = (1.0f - expf(-2.0f * a * T)) / (2.0f * a);
-
     float volga = 0.0f;
 
     for(int i = 0; i < n_tenors; i++){
@@ -146,8 +144,8 @@ inline float analytical_payer_swaption_volga(float T, const float* tenor_dates, 
         // term 1: Φ(-h+σ_p) · Xi·P(0,T) · srvn_T · Bi² · (σ²·srvn_T·Bi² - 1)
         float term1 = normcdff(-ps.h + ps.sigma_p)
                     * X_i * ps.bT.P
-                    * srvn_T * B_T_Ti * B_T_Ti
-                    * (sigma * sigma * srvn_T * B_T_Ti * B_T_Ti - 1.0f);
+                    * (1.0f - expf(-2.0f * a * T)) / (2.0f * a) * B_T_Ti * B_T_Ti
+                    * (sigma * sigma * (1.0f - expf(-2.0f * a * T)) / (2.0f * a) * B_T_Ti * B_T_Ti - 1.0f);
 
         // term 2: (σ_p/σ) · P(0,ti) · φ(-hi) · hi · dh_ds
         //       = dsp_ds · PS_phi_h · h · dh_ds

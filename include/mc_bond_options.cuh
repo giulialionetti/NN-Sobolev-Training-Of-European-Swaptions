@@ -72,4 +72,134 @@ __global__ void mc_zbc_vega(float* ZBC_estimator, float* vega_estimator,
 }
 
 
+void monteCarlo_vega(float T, float S, float K, curandState* d_states, CurveType curve,
+                     float* d_P_market = nullptr, float* d_f_market = nullptr,
+                     float* h_P = nullptr, float* h_f = nullptr){
+
+    float* d_ZBC  = nullptr;
+    float* d_vega = nullptr;
+    cudaMalloc(&d_ZBC,  sizeof(float));
+    cudaMalloc(&d_vega, sizeof(float));
+    cudaMemset(d_ZBC,  0, sizeof(float));
+    cudaMemset(d_vega, 0, sizeof(float));
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    const char* label = (curve == CurveType::FLAT)   ? "FLAT"      :
+                        (d_P_market == nullptr)        ? "PIECEWISE" : "PIECEWISE+MARKET";
+    LOG_INFO("=== MC Pricing [%s curve] ===", label);
+
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC, d_vega, d_states, T, S, K, d_P_market, d_f_market);
+
+    cudaEventRecord(stop);
+    cudaDeviceSynchronize();
+
+    float elapsed_ms;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+
+    float h_ZBC, h_vega;
+    cudaMemcpy(&h_ZBC,  d_ZBC,  sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_vega, d_vega, sizeof(float), cudaMemcpyDeviceToHost);
+    h_ZBC  /= N_PATHS;
+    h_vega /= N_PATHS;
+
+    if(d_P_market == nullptr){
+        // Flat curve — build PricingState with FlatCurve
+        auto ps           = make_pricing_state(0.0f, T, S, K, host_r0,
+                                               host_a, host_sigma,
+                                               FlatCurve{host_a, host_sigma, host_r0});
+        float analytical_zbc  = ZBC_from_state(ps);
+        float analytical_vega = vega_ZBC_from_state(ps);
+        LOG_INFO("MC ZBC:          %.6f  |  Analytical: %.6f  |  Error: %.2e",
+                 h_ZBC, analytical_zbc, fabsf(h_ZBC - analytical_zbc));
+        LOG_INFO("MC Vega:         %.6f  |  Analytical: %.6f  |  Error: %.2e",
+                 h_vega, analytical_vega, fabsf(h_vega - analytical_vega));
+    } else {
+        // Market curve — build PricingState with MarketCurve
+        auto ps           = make_pricing_state(0.0f, T, S, K, host_r0,
+                                               host_a, host_sigma,
+                                               MarketCurve{host_a, host_sigma,
+                                                           h_P, h_f,
+                                                           MAT_SPACING, N_MAT});
+        float analytical_zbc  = ZBC_from_state(ps);
+        float analytical_vega = vega_ZBC_from_state(ps);
+        LOG_INFO("MC ZBC:          %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+                 h_ZBC, analytical_zbc, fabsf(h_ZBC - analytical_zbc));
+        LOG_INFO("MC Vega:         %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+                 h_vega, analytical_vega, fabsf(h_vega - analytical_vega));
+    }
+
+    cudaFree(d_ZBC);
+    cudaFree(d_vega);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+}
+
+void finitedifferences_mc_vega(float T, float S, float K, curandState* d_states, CurveType curve,
+                                float* d_P_market = nullptr, float* d_f_market = nullptr,
+                                float* h_P = nullptr, float* h_f = nullptr){
+
+    float eps        = 0.001f;
+    unsigned long seed = time(NULL);
+
+    float* d_ZBC_plus   = nullptr;
+    float* d_ZBC_minus  = nullptr;
+    float* d_vega_dummy = nullptr;
+    cudaMalloc(&d_ZBC_plus,   sizeof(float));
+    cudaMalloc(&d_ZBC_minus,  sizeof(float));
+    cudaMalloc(&d_vega_dummy, sizeof(float));
+
+    cudaMemset(d_ZBC_plus,   0, sizeof(float));
+    cudaMemset(d_vega_dummy, 0, sizeof(float));
+    init_device_constants(host_sigma + eps, curve);
+    init_rng<<<NB, NTPB>>>(d_states, seed);
+    cudaDeviceSynchronize();
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_plus, d_vega_dummy, d_states, T, S, K,
+                               d_P_market, d_f_market);
+    cudaDeviceSynchronize();
+
+    cudaMemset(d_ZBC_minus,  0, sizeof(float));
+    cudaMemset(d_vega_dummy, 0, sizeof(float));
+    init_device_constants(host_sigma - eps, curve);
+    init_rng<<<NB, NTPB>>>(d_states, seed);
+    cudaDeviceSynchronize();
+    mc_zbc_vega<<<NB, NTPB>>>(d_ZBC_minus, d_vega_dummy, d_states, T, S, K,
+                               d_P_market, d_f_market);
+    cudaDeviceSynchronize();
+
+    float h_plus, h_minus;
+    cudaMemcpy(&h_plus,  d_ZBC_plus,  sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_minus, d_ZBC_minus, sizeof(float), cudaMemcpyDeviceToHost);
+    h_plus  /= N_PATHS;
+    h_minus /= N_PATHS;
+
+    float vega_fd = (h_plus - h_minus) / (2.0f * eps);
+
+    if(d_P_market == nullptr){
+        auto ps               = make_pricing_state(0.0f, T, S, K, host_r0,
+                                                   host_a, host_sigma,
+                                                   FlatCurve{host_a, host_sigma, host_r0});
+        float analytical_vega = vega_ZBC_from_state(ps);
+        LOG_INFO("FD Vega:         %.6f  |  Analytical: %.6f  |  Error: %.2e",
+                 vega_fd, analytical_vega, fabsf(vega_fd - analytical_vega));
+    } else {
+        auto ps               = make_pricing_state(0.0f, T, S, K, host_r0,
+                                                   host_a, host_sigma,
+                                                   MarketCurve{host_a, host_sigma,
+                                                               h_P, h_f,
+                                                               MAT_SPACING, N_MAT});
+        float analytical_vega = vega_ZBC_from_state(ps);
+        LOG_INFO("FD Vega:         %.6f  |  Analytical (market): %.6f  |  Error: %.2e",
+                 vega_fd, analytical_vega, fabsf(vega_fd - analytical_vega));
+    }
+
+    cudaFree(d_ZBC_plus);
+    cudaFree(d_ZBC_minus);
+    cudaFree(d_vega_dummy);
+}
+
+
 #endif // MC_BOND_OPTIONS_CUH
