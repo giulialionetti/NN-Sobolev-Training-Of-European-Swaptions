@@ -2,7 +2,7 @@
 #ifndef MC_OPTION_PRICING_CUH
 #define MC_OPTION_PRICING_CUH
 
-#include <cstdio>
+
 __global__ void simulate_option(float* out,
                                  curandState* states,
                                  const float* P0, const float* f0,
