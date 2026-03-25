@@ -51,16 +51,5 @@ __device__ inline void evolve_short_rate_derivative(float& dr_dsigma,
     dr_dsigma            = dr_dsigma_next;
 }
 
-__device__ inline void evolve_short_rate_second_derivative(
-                            float& d2r_dsigma2,
-                            float& d2r_dsigma2_integral,
-                            float  sensitivity_drift2,
-                            float  G){
-    float d2r_dsigma2_next = d2r_dsigma2 * device_mean_reversion_factor
-                           + sensitivity_drift2;
-
-    d2r_dsigma2_integral  += 0.5f * (d2r_dsigma2 + d2r_dsigma2_next) * device_dt;
-    d2r_dsigma2            = d2r_dsigma2_next;
-}
 
 #endif // MC_ENGINE_CUH
