@@ -44,20 +44,24 @@ __global__ void simulate_swaption(float* out,
         float disc = expf(-discount_integral);
 
         
-        float swap_val = 0.0f;
-        float dswap_ds = 0.0f;
+        float swap_val   = 0.0f;
+        float dswap_ds   = 0.0f;
+       
 
         for(int i = 0; i < d_n_tenors; i++){
-            float Ti     = d_tenor_dates[i];
-            float B_T_Ti = B(T, Ti, a);
-            float P_T_Ti = P(P0, f0, T, Ti, r, a, sigma);
+            float Ti         = d_tenor_dates[i];
+            float B_T_Ti     = B(T, Ti, a);
+            float P_T_Ti     = P(P0, f0, T, Ti, r, a, sigma);
 
-            float sens_A   = (sigma / (2.0f * a)) * (1.0f - expf(-2.0f * a * T)) * B_T_Ti * B_T_Ti;
-            float sens_rT  = B_T_Ti * dr_dsigma;
-            float dP_T_Ti  = -P_T_Ti * (sens_A + sens_rT);
+            float sens_A     = (sigma / (2.0f * a)) * (1.0f - expf(-2.0f * a * T)) * B_T_Ti * B_T_Ti;
+            float dsens_A_ds = (1.0f  / (2.0f * a)) * (1.0f - expf(-2.0f * a * T)) * B_T_Ti * B_T_Ti;
+            float sens_rT    = B_T_Ti * dr_dsigma;
+            float dP_T_Ti    = -P_T_Ti * (sens_A + sens_rT);
+           
 
-            swap_val += d_c[i] * P_T_Ti;
-            dswap_ds += d_c[i] * dP_T_Ti;
+            swap_val   += d_c[i] * P_T_Ti;
+            dswap_ds   += d_c[i] * dP_T_Ti;
+         
         }
 
         float pay = fmaxf(1.0f - swap_val, 0.0f);
