@@ -7,21 +7,21 @@
 #include "hw_model.cuh"
 #include "hw_constants.cuh"
 
-__constant__ float device_a;
-__constant__ float device_sigma;
-__constant__ float device_dt;
-__constant__ float device_mean_reversion_factor;
-__constant__ float device_std_gaussian_shock;
+struct HWParams {
+    float a;
+    float sigma;
+    float dt;
+    float mean_reversion_factor;   // exp(-a*dt)
+    float std_gaussian_shock;      // sigma * sqrt((1-exp(-2a*dt))/(2a))
+};
 
-inline void init(float a, float sigma){
-    float mean_reversion_factor = expf(-a * host_dt);
-    float std_gaussian_shock = sigma * sqrtf((1.0f - expf(-2.0f * a * host_dt)) / (2.0f * a));
-    cudaMemcpyToSymbol(device_a, &a, sizeof(float));
-    cudaMemcpyToSymbol(device_sigma, &sigma,sizeof(float));
-    cudaMemcpyToSymbol(device_dt, &host_dt, sizeof(float));
-    cudaMemcpyToSymbol(device_mean_reversion_factor, &mean_reversion_factor, sizeof(float));
-    cudaMemcpyToSymbol(device_std_gaussian_shock, &std_gaussian_shock, sizeof(float));
+inline HWParams params(float a, float sigma) {
+    float dt                   = T_FINAL / N_STEPS;
+    float mean_reversion_factor = expf(-a * dt);
+    float std_gaussian_shock    = sigma * sqrtf((1.0f - expf(-2.0f * a * dt)) / (2.0f * a));
+    return { a, sigma, dt, mean_reversion_factor, std_gaussian_shock };
 }
+
 
 __global__ void init_rng(curandState* states, unsigned long seed){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -31,24 +31,23 @@ __global__ void init_rng(curandState* states, unsigned long seed){
 __device__ inline void evolve_short_rate(float& r,
                                           float& discount_integral,
                                           float  drift,
-                                          float  G){
-    float r_next = r * device_mean_reversion_factor + drift
-                       + device_std_gaussian_shock * G;
-
-    discount_integral += 0.5f * (r + r_next) * device_dt;
+                                          float  G,
+                                          const HWParams p) {
+    float r_next = r * p.mean_reversion_factor + drift + p.std_gaussian_shock * G;
+    discount_integral += 0.5f * (r + r_next) * p.dt;
     r = r_next;
 }
 
 __device__ inline void evolve_short_rate_derivative(float& dr_dsigma,
                                                       float& dr_dsigma_integral,
                                                       float  sensitivity_drift,
-                                                      float  G){
-    float dr_dsigma_next  = dr_dsigma * device_mean_reversion_factor
+                                                      float  G,
+                                                      const HWParams p) {
+    float dr_dsigma_next = dr_dsigma * p.mean_reversion_factor
                          + sensitivity_drift
-                         + (device_std_gaussian_shock / device_sigma) * G;
-
-    dr_dsigma_integral  += 0.5f * (dr_dsigma + dr_dsigma_next) * device_dt;
-    dr_dsigma            = dr_dsigma_next;
+                         + (p.std_gaussian_shock / p.sigma) * G;
+    dr_dsigma_integral += 0.5f * (dr_dsigma + dr_dsigma_next) * p.dt;
+    dr_dsigma           = dr_dsigma_next;
 }
 
 

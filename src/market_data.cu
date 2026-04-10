@@ -7,35 +7,34 @@ const float a     = 1.0f;
 const float sigma = 0.1f;
 const float r0    = 0.012f;
 
-
-// nvcc -o print_curve src/print_curve.cu -I include -lcurand
-// ./print_curve
-
-
-int main(){
-    init(a, sigma);
-
+int main() {
     curandState* d_states;
     cudaMalloc(&d_states, N_PATHS * sizeof(curandState));
 
-    init_drift(a, sigma, r0);
+    float* d_drift;
+    float* d_sens_drift;
+    alloc_drift_tables(&d_drift, &d_sens_drift);
+
+    HWParams p = params(a, sigma);
+    init_drift(a, sigma, r0, d_drift, d_sens_drift);
 
     init_rng<<<NB, NTPB>>>(d_states, time(NULL));
     cudaDeviceSynchronize();
 
     float h_P[N_MAT];
-    simulate_market_price(h_P, d_states, r0);
+    simulate_market_price(h_P, d_states, d_drift, p, r0);
 
     float f0[N_MAT];
-    calibrate(h_P, f0, a, sigma);
+    calibrate(h_P, f0, a, sigma, d_drift, d_sens_drift);
 
     printf("\n=== Bond Prices and Forward Rates ===\n");
     printf("%-10s  %-14s  %-14s\n", "Maturity", "P(0,T)", "f(0,T)");
-    for(int i = 0; i < N_MAT; i++){
+    for (int i = 0; i < N_MAT; i++) {
         float t = (i + 1) * MAT_SPACING;
         printf("%-10.2f  %-14.6f  %-14.6f\n", t, h_P[i], f0[i]);
     }
 
+    free_drift_tables(d_drift, d_sens_drift);
     cudaFree(d_states);
     return 0;
 }
