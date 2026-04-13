@@ -81,6 +81,76 @@ __global__ void simulate_swaption(float* out,
 }
 
 
+__global__ __launch_bounds__(1024, 1) void simulate_swaption_volga(float* out,
+                                         curandState* states,
+                                         const float* P0, const float* f0_base,
+                                         const float* f0_up, const float* f0_down,
+                                         const float* d_drift_base,
+                                         const float* d_drift_up,
+                                         const float* d_drift_down,
+                                         HWParams p_base,
+                                         HWParams p_up,
+                                         HWParams p_down,
+                                         float T, float r0,
+                                         const float* tenor_dates,
+                                         const float* c,
+                                         int n_tenors,
+                                         float eps_v) {
+    int id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    __shared__ float s_volga[NTPB];
+    s_volga[threadIdx.x] = 0.0f;
+
+    if (id < N_PATHS) {
+        curandState local_state = states[id];
+
+        // three paths with same Gaussian draws, different sigma
+        float r_base = r0, r_up = r0, r_down = r0;
+        float di_base = 0.0f, di_up = 0.0f, di_down = 0.0f;
+
+        int n_steps = (int)(T / p_base.dt);
+        for (int i = 0; i < n_steps; i++) {
+            float G = curand_normal(&local_state);
+            evolve_short_rate(r_base, di_base, d_drift_base[i], G, p_base);
+            evolve_short_rate(r_up,   di_up,   d_drift_up  [i], G, p_up);
+            evolve_short_rate(r_down, di_down, d_drift_down[i], G, p_down);
+        }
+
+        float disc_base  = expf(-di_base);
+        float disc_up    = expf(-di_up);
+        float disc_down  = expf(-di_down);
+
+        float swap_base = 0.0f, swap_up = 0.0f, swap_down = 0.0f;
+        for (int i = 0; i < n_tenors; i++) {
+            float Ti = tenor_dates[i];
+            swap_base += c[i] * P(P0, f0_base, T, Ti, r_base, p_base.a, p_base.sigma);
+            swap_up   += c[i] * P(P0, f0_up,   T, Ti, r_up,   p_up.a,   p_up.sigma);
+            swap_down += c[i] * P(P0, f0_down, T, Ti, r_down, p_down.a, p_down.sigma);
+        }
+
+        float pay_base = fmaxf(1.0f - swap_base, 0.0f);
+        float pay_up   = fmaxf(1.0f - swap_up,   0.0f);
+        float pay_down = fmaxf(1.0f - swap_down,  0.0f);
+
+        s_volga[threadIdx.x] = (disc_up   * pay_up
+                              - 2.0f * disc_base * pay_base
+                              +  disc_down * pay_down) / (eps_v * eps_v);
+
+        states[id] = local_state;
+    }
+
+    __syncthreads();
+    for (int i = NTPB/2; i > 0; i >>= 1) {
+        if (threadIdx.x < i)
+            s_volga[threadIdx.x] += s_volga[threadIdx.x + i];
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+        atomicAdd(&out[0], s_volga[0]);
+}
+
+
 __global__ void simulate_swaption_delta(float* out,
                                          curandState* states,
                                          const float* P0, const float* f0,
