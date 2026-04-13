@@ -1,36 +1,23 @@
 """
-train_zbc.py  (swaption edition — tuned for ~10k samples)
 
 Sobolev training for an analytical swaption pricer neural network.
 
-The network learns the mapping:
-    phi(a, sigma, r0, T, swap_length, K)  -->  swaption price
+The network learns the mapping: phi(a, sigma, r0, T, swap_length, K)  -->  swaption price
 
 Loss function follows Saadeddine (2022) "Fast Calibration using Complex-Step
 Sobolev Training", Propositions 1 & 2:
 
-    L = RelMSE(price)
-      + E[(u^T ∇φ  -  u^T ∇label)²]
+    L = RelMSE(price) + E[(u^T ∇φ  -  u^T ∇label)²]
 
 where u_k ~ ±sqrt(lambda_k) (Rademacher, scaled) is drawn fresh each batch.
 This replaces the per-greek MSE terms with a single directional derivative,
 equivalent in expectation (Prop. 1) and optimal in variance (Prop. 2), while
 requiring only ONE autograd.grad call regardless of the number of supervised dims.
 
-Tuning notes for ~10k samples
-──────────────────────────────
-  • Smaller architecture (3×64, ~12k params) to avoid overfitting with
-    limited data. Sobolev supervision acts as the primary regulariser.
-  • Higher lambda_v / lambda_d (10.0) — greek supervision is more
-    valuable when sample density is low.
-  • Relative price MSE equalises importance across the skewed price range.
-  • Smaller batch (128) for more gradient steps/epoch and implicit regularisation.
-  • 3000 epochs max with early stopping (patience=200).
-  • Cosine LR decay from 1e-3 → 1e-5.
 
 Usage:
-    python train_zbc.py                   # expects data/swaption_data.csv
-    python train_zbc.py --lambda_v 5.0    # reduce greek weight if loss is unstable
+    python train.py                   # expects data/swaption_data.csv
+    python train.py --lambda_v 5.0    # reduce greek weight if loss is unstable
 
 """
 
@@ -48,29 +35,28 @@ parser.add_argument("--epochs",       type=int,   default=3000,
                     help="max epochs; early stopping may halt training sooner")
 parser.add_argument("--patience",     type=int,   default=200,
                     help="early-stopping patience in epochs")
-parser.add_argument("--batch",        type=int,   default=128,
+parser.add_argument("--batch",        type=int,   default=512,
                     help="smaller batch for more gradient steps/epoch and implicit regularisation")
 parser.add_argument("--lr",           type=float, default=1e-3)
-parser.add_argument("--hidden",       type=int,   default=64)
-parser.add_argument("--layers",       type=int,   default=3,
+parser.add_argument("--hidden",       type=int,   default=128)
+parser.add_argument("--layers",       type=int,   default=4,
                     help="3 layers keeps param count well below 20%% of 10k samples")
 # Sobolev weights — scale the Rademacher direction per Proposition 2.
 # Increased from 5.0 → 10.0: greek supervision is the primary regulariser
 # when sample density is low.
-parser.add_argument("--lambda_v",     type=float, default=10.0,
+parser.add_argument("--lambda_v",     type=float, default=5.0,
                     help="weight on vega   (d price / d sigma)")
-parser.add_argument("--lambda_d",     type=float, default=10.0,
+parser.add_argument("--lambda_d",     type=float, default=5.0,
                     help="weight on delta  (d price / d r0)")
 parser.add_argument("--out",          default="swaption_model.pt")
 args = parser.parse_args()
 
-# ── Device ────────────────────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}"
       + (f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
 
 
-# ── Data ──────────────────────────────────────────────────────────────────────
+
 df = pd.read_csv(args.data)
 print(f"Loaded {len(df)} samples from {args.data}")
 if len(df) > 50_000:
