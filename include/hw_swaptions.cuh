@@ -212,7 +212,7 @@ __host__ __device__ inline float analytical_swaption_da(float T, const float* te
     }
     float dr_star_da = -num_dr / den_dr;
 
-    
+
     float result = 0.0f;
     for (int i = 0; i < n_tenors; i++) {
         float Ti      = tenor_dates[i];

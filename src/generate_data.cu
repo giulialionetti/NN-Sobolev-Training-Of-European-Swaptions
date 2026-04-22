@@ -16,13 +16,22 @@
 static const int DEFAULT_STREAMS_PER_GPU  = 4;
 static const int DEFAULT_PATHS_PER_STREAM = 1024 * 1024;
 
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = (call); \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error at %s:%d — %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(1); \
+    } \
+} while(0)
+
 struct StreamContext {
     cudaStream_t stream;
     curandState* d_states;
     float*       d_drift;
     float*       d_sens_drift;
-    float*       h_drift;       // pinned staging for async drift upload
-    float*       h_sens_drift;  // pinned staging for async sens_drift upload
+    float*       h_drift;       
+    float*       h_sens_drift;  
     float*       d_P0_sum;
     float*       d_P0;
     float*       d_f0;
@@ -32,39 +41,36 @@ struct StreamContext {
     int          paths;
     int          blocks;
 };
-
-static void alloc_ctx(StreamContext& ctx, int id, int paths, unsigned long seed) {
-    ctx.id     = id;
-    ctx.paths  = paths;
-    ctx.blocks = (paths + NTPB - 1) / NTPB;
-    cudaStreamCreate(&ctx.stream);
-    cudaMalloc(&ctx.d_states,  paths * sizeof(curandState));
-    alloc_drift_tables(&ctx.d_drift, &ctx.d_sens_drift);
-    cudaMalloc(&ctx.d_P0_sum, N_MAT * sizeof(float));
-    cudaMalloc(&ctx.d_P0,     N_MAT * sizeof(float));
-    cudaMalloc(&ctx.d_f0,     N_MAT * sizeof(float));
-    cudaMallocHost(&ctx.h_P,  N_MAT * sizeof(float));
-    cudaMallocHost(&ctx.h_f0, N_MAT * sizeof(float));
-    cudaMallocHost(&ctx.h_drift,      N_STEPS * sizeof(float));  // add
-    cudaMallocHost(&ctx.h_sens_drift, N_STEPS * sizeof(float));  // add
-    cudaMalloc(&ctx.d_P0_sum, N_MAT * sizeof(float));
-    init_rng<<<ctx.blocks, NTPB, 0, ctx.stream>>>(ctx.d_states, seed, ctx.paths);
-    cudaStreamSynchronize(ctx.stream);
+static void alloc_context(StreamContext& context, int id, int paths, unsigned long seed) {
+    context.id     = id;
+    context.paths  = paths;
+    context.blocks = (paths + NTPB - 1) / NTPB;
+    CUDA_CHECK(cudaStreamCreate(&context.stream));
+    CUDA_CHECK(cudaMalloc(&context.d_states, paths * sizeof(curandState)));
+    alloc_drift_tables(&context.d_drift, &context.d_sens_drift);
+    CUDA_CHECK(cudaMalloc(&context.d_P0_sum, N_MAT * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&context.d_P0, N_MAT * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&context.d_f0, N_MAT * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&context.h_P, N_MAT   * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&context.h_f0, N_MAT   * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&context.h_drift, N_STEPS * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&context.h_sens_drift, N_STEPS * sizeof(float)));
+    init_rng<<<context.blocks, NTPB, 0, context.stream>>>(context.d_states, seed, context.paths);
+    CUDA_CHECK(cudaStreamSynchronize(context.stream));
 }
 
-static void free_ctx(StreamContext& ctx) {
-    cudaStreamSynchronize(ctx.stream);
-    cudaStreamDestroy(ctx.stream);
-    cudaFree(ctx.d_states);
-    free_drift_tables(ctx.d_drift, ctx.d_sens_drift);
-    cudaFreeHost(ctx.h_drift);      
-    cudaFreeHost(ctx.h_sens_drift); 
-    cudaFree(ctx.d_P0_sum);
-    cudaFree(ctx.d_P0_sum);
-    cudaFree(ctx.d_P0);
-    cudaFree(ctx.d_f0);
-    cudaFreeHost(ctx.h_P);
-    cudaFreeHost(ctx.h_f0);
+static void free_context(StreamContext& context) {
+    cudaStreamSynchronize(context.stream);
+    cudaStreamDestroy(context.stream);
+    cudaFree(context.d_states);
+    free_drift_tables(context.d_drift, context.d_sens_drift);
+    cudaFreeHost(context.h_drift);
+    cudaFreeHost(context.h_sens_drift);
+    cudaFree(context.d_P0_sum);
+    cudaFree(context.d_P0);
+    cudaFree(context.d_f0);
+    cudaFreeHost(context.h_P);
+    cudaFreeHost(context.h_f0);
 }
 
 struct SampleParams {
@@ -169,21 +175,14 @@ static bool collect_sample(StreamContext& ctx,
     return true;
 }
 
-// ── Per-GPU worker ────────────────────────────────────────────────────────────
-static void gpu_worker(int gpu_id,
-                       int n_streams,
-                       int n_samples,
-                       int sample_start,
-                       unsigned long base_seed,
-                       const std::string& out_path) {
+static void gpu_worker(int gpu_id, int n_streams, int n_samples, int sample_start, unsigned long base_seed, const std::string& out_path) {
 
     cudaSetDevice(gpu_id);
 
     int actual_device = -1;
     cudaGetDevice(&actual_device);
     if (actual_device != gpu_id) {
-        fprintf(stderr, "[GPU %d] ERROR: bound to device %d instead\n",
-                gpu_id, actual_device);
+        fprintf(stderr, "[GPU %d] ERROR: bound to device %d instead\n", gpu_id, actual_device);
         return;
     }
     fprintf(stderr, "[GPU %d] Thread bound successfully\n", gpu_id);
@@ -194,18 +193,15 @@ static void gpu_worker(int gpu_id,
 
     std::string fname = out_path + "_gpu" + std::to_string(gpu_id) + ".csv";
     FILE* fp = fopen(fname.c_str(), "w");
-    if (!fp) {
-        fprintf(stderr, "[GPU %d] Cannot open %s\n", gpu_id, fname.c_str());
+    if (!fp) { fprintf(stderr, "[GPU %d] Cannot open %s\n", gpu_id, fname.c_str());
         return;
     }
     fprintf(fp, "a,sigma,r0,T,swap_length,K,price,vega,volga,delta,gamma\n");
 
     std::vector<StreamContext> ctxs(n_streams);
     for (int i = 0; i < n_streams; i++) {
-        unsigned long stream_seed = base_seed
-                                  + (unsigned long)gpu_id * 500009UL
-                                  + (unsigned long)i      * 100003UL;
-        alloc_ctx(ctxs[i], i, DEFAULT_PATHS_PER_STREAM, stream_seed);
+        unsigned long stream_seed = base_seed + (unsigned long)gpu_id * 500009UL + (unsigned long)i* 100003UL;
+        alloc_context(ctxs[i], i, DEFAULT_PATHS_PER_STREAM, stream_seed);
     }
 
     std::vector<SampleResult> results(n_streams);
@@ -216,23 +212,17 @@ static void gpu_worker(int gpu_id,
     for (int s = 0; s < n_samples + n_streams; s++) {
         int slot = s % n_streams;
 
-        // ── Collect + write ───────────────────────────────────────────────
+       
         if (s >= n_streams && in_flight[slot]) {
-            collect_sample(ctxs[slot], results[slot].sp,
-                           results[slot].price, results[slot].vega,
-                           results[slot].volga, results[slot].delta,
-                           results[slot].gamma, pt);
+            collect_sample(ctxs[slot], results[slot].sp, results[slot].price, results[slot].vega, results[slot].volga, results[slot].delta, results[slot].gamma, pt);
             in_flight[slot] = false;
 
             if (n_written < n_samples) {
                 const SampleResult& r  = results[slot];
                 const SampleParams& sp = r.sp;
                 auto tw = Clock::now();
-                fprintf(fp,
-                        "%.6f,%.6f,%.6f,%.6f,%d,%.6f,"
-                        "%.8f,%.8f,%.8f,%.8f,%.8f\n",
-                        sp.a, sp.sigma, sp.r0, sp.T, sp.swap_length, sp.K,
-                        r.price, r.vega, r.volga, r.delta, r.gamma);
+                fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%d,%.6f," "%.8f,%.8f,%.8f,%.8f,%.8f\n", sp.a, sp.sigma, sp.r0, sp.T, sp.swap_length, sp.K, 
+                     r.price, r.vega, r.volga, r.delta, r.gamma);
                 pt.write_s += Sec(Clock::now() - tw).count();
                 n_written++;
 
@@ -242,7 +232,7 @@ static void gpu_worker(int gpu_id,
             }
         }
 
-        // ── Launch next ───────────────────────────────────────────────────
+        
         if (s < n_samples) {
             results[slot].sp = draw_params();
             launch_sample(ctxs[slot], results[slot].sp, pt);
@@ -275,10 +265,9 @@ static void gpu_worker(int gpu_id,
         pt.write_s     * ms, 100.0 * pt.write_s     / total_measured);
 
     for (int i = 0; i < n_streams; i++)
-        free_ctx(ctxs[i]);
+        free_context(ctxs[i]);
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     const int   N_SAMPLES = (argc > 1) ? atoi(argv[1]) : 1000000;
     const int   N_STREAMS = (argc > 2) ? atoi(argv[2]) : DEFAULT_STREAMS_PER_GPU;

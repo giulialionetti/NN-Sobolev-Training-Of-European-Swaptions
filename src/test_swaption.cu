@@ -248,6 +248,59 @@ int main() {
                           T, r0, d_tenor_dates, d_c, n_tenors, eps_r,
                           "simulate_swaption_gamma");
 
+    float eps_a = 0.001f;
+float an_da = analytical_swaption_da(T, tenor_dates, n_tenors, c, h_P, f0, a, sigma, r0);
+
+unsigned long da_seed = time(NULL);
+
+// ── up ────────────────────────────────────────────────────────────────────
+HWParams p_aup = params(a + eps_a, sigma);
+float f0_aup[N_MAT];
+float* d_drift_aup; float* d_sens_drift_aup;
+alloc_drift_tables(&d_drift_aup, &d_sens_drift_aup);
+calibrate(h_P, f0_aup, a + eps_a, sigma, d_drift_aup, d_sens_drift_aup);
+float* d_f0_aup; cudaMalloc(&d_f0_aup, N_MAT * sizeof(float));
+cudaMemcpy(d_f0_aup, f0_aup, N_MAT * sizeof(float), cudaMemcpyHostToDevice);
+init_rng<<<NB, NTPB>>>(d_states, da_seed, N_PATHS);
+cudaDeviceSynchronize();
+float* d_out_da; cudaMalloc(&d_out_da, 2 * sizeof(float));
+cudaMemset(d_out_da, 0, 2 * sizeof(float));
+simulate_swaption<<<NB, NTPB>>>(d_out_da, d_states, d_P0, d_f0_aup,
+                                  d_drift_aup, d_sens_drift_aup, p_aup,
+                                  T, r0, d_tenor_dates, d_c, n_tenors);
+cudaDeviceSynchronize();
+float h_aup[2]; cudaMemcpy(h_aup, d_out_da, 2*sizeof(float), cudaMemcpyDeviceToHost);
+float v_up = h_aup[0] / N_PATHS;
+
+// ── down ──────────────────────────────────────────────────────────────────
+HWParams p_adown = params(a - eps_a, sigma);
+float f0_adown[N_MAT];
+float* d_drift_adown; float* d_sens_drift_adown;
+alloc_drift_tables(&d_drift_adown, &d_sens_drift_adown);
+calibrate(h_P, f0_adown, a - eps_a, sigma, d_drift_adown, d_sens_drift_adown);
+float* d_f0_adown; cudaMalloc(&d_f0_adown, N_MAT * sizeof(float));
+cudaMemcpy(d_f0_adown, f0_adown, N_MAT * sizeof(float), cudaMemcpyHostToDevice);
+init_rng<<<NB, NTPB>>>(d_states, da_seed, N_PATHS);
+cudaDeviceSynchronize();
+cudaMemset(d_out_da, 0, 2 * sizeof(float));
+simulate_swaption<<<NB, NTPB>>>(d_out_da, d_states, d_P0, d_f0_adown,
+                                  d_drift_adown, d_sens_drift_adown, p_adown,
+                                  T, r0, d_tenor_dates, d_c, n_tenors);
+cudaDeviceSynchronize();
+float h_adown[2]; cudaMemcpy(h_adown, d_out_da, 2*sizeof(float), cudaMemcpyDeviceToHost);
+float v_down = h_adown[0] / N_PATHS;
+
+float mc_fd_da = (v_up - v_down) / (2.0f * eps_a);
+
+printf("dV/da  analytical=%.6f  MC FD=%.6f  err=%.2e\n",
+       an_da, mc_fd_da, fabsf(an_da - mc_fd_da));
+
+free_drift_tables(d_drift_aup,   d_sens_drift_aup);
+free_drift_tables(d_drift_adown, d_sens_drift_adown);
+cudaFree(d_f0_aup);
+cudaFree(d_f0_adown);
+cudaFree(d_out_da);
+
     
 
     printf("\n=== Payer Swaption %.0fYx%.0fY  |  a=%.1f  sigma=%.2f  r0=%.3f  K=%.4f ===\n",
@@ -258,6 +311,13 @@ int main() {
      printf("%-12s  %-14.6f  %-14.6f  %-12.2e\n", "Volga", h_volga[0],      an_volga, fabsf(h_volga[0]   - an_volga));
     printf("%-12s  %-14.6f  %-14.6f  %-12.2e\n", "Delta",      h_delta[0],  an_delta, fabsf(h_delta[0]  - an_delta));
     printf("%-12s  %-14.6f  %-14.6f  %-12.2e\n", "Gamma",      h_gamma[0],  an_gamma, fabsf(h_gamma[0]  - an_gamma));
+ 
+printf("dV/da  analytical=%.6f  MC FD=%.6f  err=%.2e\n", an_da, mc_fd_da, fabsf(an_da - mc_fd_da));
+float an_d2a = analytical_swaption_d2a(T, tenor_dates, n_tenors, c, h_P, f0, a, sigma, r0);
+float fd_d2a = (analytical_swaption_da(T, tenor_dates, n_tenors, c, h_P, f0, a + eps_a, sigma, r0)
+              - analytical_swaption_da(T, tenor_dates, n_tenors, c, h_P, f0, a - eps_a, sigma, r0))
+             / (2.0f * eps_a);
+printf("d²V/da²  analytical=%.6f  FD=%.6f  err=%.2e\n", an_d2a, fd_d2a, fabsf(an_d2a - fd_d2a));
 
     free_drift_tables(d_drift, d_sens_drift);
     cudaFree(d_P0); cudaFree(d_f0); cudaFree(d_states);

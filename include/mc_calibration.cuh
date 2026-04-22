@@ -34,11 +34,7 @@ inline void theta(const float* log_P, const float* f0,
     th[N_MAT-1] = th[N_MAT-2];
 }
 
-// ---------------------------------------------------------------------------
-// upload_drift: builds drift tables into caller-supplied pinned host buffers
-// then transfers async on stream. h_drift/h_sens_drift must be pinned
-// (cudaMallocHost). No sync — kernel enqueued on same stream follows in order.
-// ---------------------------------------------------------------------------
+
 inline void upload_drift(const float* th,
                           float a, float sigma,
                           float* d_drift, float* d_sens_drift,
@@ -72,10 +68,7 @@ inline void upload_drift(const float* th,
                     cudaMemcpyHostToDevice, stream);
 }
 
-// ---------------------------------------------------------------------------
-// Stream-aware versions: caller supplies pinned buffers + stream.
-// Used by generate_data_mgpu.cu — no internal alloc, no sync.
-// ---------------------------------------------------------------------------
+// stream-aware version of calibrate and init_drift 
 inline void calibrate(const float* h_P, float* f0,
                       float a, float sigma,
                       float* d_drift, float* d_sens_drift,
@@ -103,11 +96,7 @@ inline void init_drift(float a, float sigma, float r0,
     upload_drift(th, a, sigma, d_drift, d_sens_drift, h_drift, h_sens_drift, stream);
 }
 
-// ---------------------------------------------------------------------------
-// Serial convenience versions: no pinned buffers or stream needed.
-// Used by generate_data.cu, test.cu, etc. — signature unchanged from original.
-// Allocates pinned staging internally, syncs, then frees.
-// ---------------------------------------------------------------------------
+// serial versions of calibrate and init_drift for simplicity and correctness verification
 inline void calibrate(const float* h_P, float* f0,
                       float a, float sigma,
                       float* d_drift, float* d_sens_drift) {
